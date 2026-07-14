@@ -38,10 +38,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     let iconUrl = "https://www.sadcaptcha.com/api/v1/shein-icon?licenseKey=";
     const API_HEADERS = new Headers({ "Content-Type": "application/json" });
     const ICON_IMAGE_DIV = ".pic_wrapper";
-    const ICON_SUBMIT_BUTTON = "ICON SUBMIT BUTTON PLACEHOLDER";
+    const ICON_SUBMIT_BUTTON = ".captcha_click_confirm";
+    const ICON_REFRESH_BUTTON = ".captcha_click_refresh";
     const ICON_UNIQUE_IDENTIFIERS = [ICON_IMAGE_DIV];
     const CAPTCHA_PRESENCE_INDICATORS = [
-        ICON_IMAGE_DIV
+        ICON_IMAGE_DIV,
+        ICON_SUBMIT_BUTTON,
+        ICON_REFRESH_BUTTON
     ];
     let CaptchaType;
     (function (CaptchaType) {
@@ -429,26 +432,34 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     }
     function solveIcon() {
         return __awaiter(this, void 0, void 0, function* () {
-            let iconImageDiv = yield waitForElement(ICON_IMAGE_DIV);
-            // The captcha image is rendered as a CSS background-image on the wrapper.
-            // Extract the url from between the quotes of the background-image value.
-            let backgroundImage = window.getComputedStyle(iconImageDiv).backgroundImage;
-            let imageUrl = backgroundImage.match(/(?<=").*(?=")/)[0];
-            console.log("extracted icon image url: " + imageUrl);
-            // Download the image and send it as a base64 encoded string to the icon api.
-            let imageDataUrl = yield fetchImageAsBase64(imageUrl);
-            let imageB64 = getBase64StringFromDataURL(imageDataUrl);
-            let solution = yield iconApiCall(imageB64);
-            console.log("got icon api solution:");
-            console.dir(solution);
-            // Click each returned point on the image with a natural delay between clicks.
-            for (const point of solution.proportionalPoints) {
-                clickProportional(iconImageDiv, point.proportionX, point.proportionY);
-                yield new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
+            try {
+                let iconImageDiv = yield waitForElement(ICON_IMAGE_DIV);
+                // The captcha image is rendered as a CSS background-image on the wrapper.
+                // Extract the url from between the quotes of the background-image value.
+                let backgroundImage = window.getComputedStyle(iconImageDiv).backgroundImage;
+                let imageUrl = backgroundImage.match(/(?<=").*(?=")/)[0];
+                console.log("extracted icon image url: " + imageUrl);
+                // Download the image and send it as a base64 encoded string to the icon api.
+                let imageDataUrl = yield fetchImageAsBase64(imageUrl);
+                let imageB64 = getBase64StringFromDataURL(imageDataUrl);
+                let solution = yield iconApiCall(imageB64);
+                console.log("got icon api solution:");
+                console.dir(solution);
+                // Click each returned point on the image with a natural delay between clicks.
+                for (const point of solution.proportionalPoints) {
+                    clickProportional(iconImageDiv, point.proportionX, point.proportionY);
+                    yield new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
+                }
+                // Submit the solution.
+                clickElement(ICON_SUBMIT_BUTTON);
+                yield new Promise(r => setTimeout(r, 3000));
             }
-            // Submit the solution.
-            clickElement(ICON_SUBMIT_BUTTON);
-            yield new Promise(r => setTimeout(r, 3000));
+            catch (err) {
+                console.log(err);
+                console.log("refreshing captcha");
+                clickElement(ICON_REFRESH_BUTTON);
+                yield new Promise(r => setTimeout(r, 2000));
+            }
         });
     }
     function captchaIsPresent() {
