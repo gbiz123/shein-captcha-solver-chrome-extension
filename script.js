@@ -26,9 +26,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         }
     });
     function getApiKey() {
-        let apiKey = true;
+        let apiKey = localStorage.getItem("sadCaptchaKey");
         if (apiKey) {
-            return "925d4ebe0258d96923994633efe2361f";
+            return apiKey;
         }
         else {
             throw new Error("could not get sadCaptchaKey from localStorage");
@@ -37,6 +37,15 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     let creditsUrl = "https://www.sadcaptcha.com/api/v1/license/credits?licenseKey=";
     let iconUrl = "https://www.sadcaptcha.com/api/v1/shein-icon?licenseKey=";
     const API_HEADERS = new Headers({ "Content-Type": "application/json" });
+    // nine captcha appears in shadow root which 
+    // main icon: document.querySelector("#nine-captcha-custom").shadowRoot.querySelector(".nine-header-content-img > img")
+    // icons: document.querySelector("#nine-captcha-custom").shadowRoot.querySelectorAll(".nine-content-pic > img")
+    // header: document.querySelector("#nine-captcha-custom").shadowRoot.querySelectorAll(".nine-header-content-title")
+    const NINE_CAPTCHA_CONTAINER = "#nine-captcha-custom";
+    const NINE_CAPTCHA_MAIN_ICON = ".nine-header-content-img > img";
+    const NINE_CAPTCHA_HEADER_TEXT = ".nine-header-content-title";
+    const NINE_CAPTCHA_ICONS = ".nine-content-pic > img";
+    const NINE_CAPTCHA_UNIQUE_IDENTIFIERS = [NINE_CAPTCHA_CONTAINER];
     const ICON_IMAGE_DIV = ".pic_wrapper";
     const ICON_SUBMIT_BUTTON = ".captcha_click_confirm";
     const ICON_REFRESH_BUTTON = ".captcha_click_refresh";
@@ -44,11 +53,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     const CAPTCHA_PRESENCE_INDICATORS = [
         ICON_IMAGE_DIV,
         ICON_SUBMIT_BUTTON,
-        ICON_REFRESH_BUTTON
+        ICON_REFRESH_BUTTON,
+        NINE_CAPTCHA_CONTAINER
     ];
     let CaptchaType;
     (function (CaptchaType) {
         CaptchaType[CaptchaType["ICON"] = 0] = "ICON";
+        CaptchaType[CaptchaType["NINE"] = 1] = "NINE";
     })(CaptchaType || (CaptchaType = {}));
     function findFirstElementToAppear(selectors) {
         return new Promise(resolve => {
@@ -144,6 +155,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
             return resp;
         });
     }
+    function nineApiCall(request) {
+        return __awaiter(this, void 0, void 0, function* () {
+            let resp = yield apiCall(iconUrl, request);
+            let j = yield resp.json();
+            console.log("icon response: " + JSON.stringify(j));
+            return j;
+        });
+    }
     function iconApiCall(imageB64) {
         return __awaiter(this, void 0, void 0, function* () {
             let resp = yield apiCall(iconUrl, {
@@ -180,6 +199,10 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 if (anySelectorInListPresent(ICON_UNIQUE_IDENTIFIERS)) {
                     console.log("icon detected");
                     return CaptchaType.ICON;
+                }
+                else if (anySelectorInListPresent(NINE_CAPTCHA_UNIQUE_IDENTIFIERS)) {
+                    console.log("nine captcha detected");
+                    return CaptchaType.NINE;
                 }
                 else {
                     yield new Promise(r => setTimeout(r, 1000));
@@ -462,6 +485,65 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
             }
         });
     }
+    function solveNine() {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const container = yield waitForElement(NINE_CAPTCHA_CONTAINER);
+                if (container.shadowRoot === null) {
+                    throw new Error(`nine captcha container (${NINE_CAPTCHA_CONTAINER}) does not have a shadow root`);
+                }
+                const mainIcon = container.shadowRoot.querySelector(NINE_CAPTCHA_MAIN_ICON);
+                const captchaHeader = container.shadowRoot.querySelector(NINE_CAPTCHA_HEADER_TEXT);
+                const icons = container.shadowRoot.querySelectorAll(NINE_CAPTCHA_ICONS);
+                if (icons.length != 9) {
+                    throw new Error(`Found ${icons.length} icons, but expected 9`);
+                }
+                const images = [];
+                for (let i = 0; i < icons.length; i++) {
+                    const icon = icons[i];
+                    const src = icon.src;
+                    images.push(yield fetchImageAsBase64(src));
+                }
+                let request = {
+                    images: images
+                };
+                if (mainIcon !== null) {
+                    console.log("this particular nine-captcha is image-to-image kind based on the main icon");
+                    const src = mainIcon.src;
+                    const mainIconB64 = yield fetchImageAsBase64(src);
+                    request.baseImageB64 = mainIconB64;
+                }
+                else if (captchaHeader !== null) {
+                    console.log("this particular nine-captcha is text-to-image kind based on the captcha header");
+                    const challengeText = captchaHeader.textContent;
+                    request.challengeText = challengeText;
+                }
+                else {
+                    throw new Error(`both the captchaHeader ${NINE_CAPTCHA_HEADER_TEXT} and mainIcon ${NINE_CAPTCHA_MAIN_ICON} were null`);
+                }
+                let solution = yield nineApiCall(request);
+                console.log("got icon api solution:");
+                console.dir(solution);
+                // Click each returned point on the image with a natural delay between clicks.
+                for (const index of solution.solutionIndices) {
+                    const answerIcon = icons[index];
+                    clickProportional(answerIcon, 0.52, 0.34);
+                    yield new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
+                    console.log("clicked icon");
+                    // check if solution success
+                }
+                // Submit the solution.
+                clickElement(ICON_SUBMIT_BUTTON);
+                yield new Promise(r => setTimeout(r, 3000));
+            }
+            catch (err) {
+                console.log(err);
+                console.log("refreshing captcha");
+                clickElement(ICON_REFRESH_BUTTON);
+                yield new Promise(r => setTimeout(r, 2000));
+            }
+        });
+    }
     function captchaIsPresent() {
         for (let i = 0; i < CAPTCHA_PRESENCE_INDICATORS.length; i++) {
             if (document.querySelector(CAPTCHA_PRESENCE_INDICATORS[i])) {
@@ -510,6 +592,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     switch (captchaType) {
                         case CaptchaType.ICON:
                             yield solveIcon();
+                            break;
+                        case CaptchaType.NINE:
+                            yield solveNine();
                             break;
                     }
                 }
