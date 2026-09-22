@@ -36,6 +36,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     }
     let creditsUrl = "https://www.sadcaptcha.com/api/v1/license/credits?licenseKey=";
     let iconUrl = "https://www.sadcaptcha.com/api/v1/shein-icon?licenseKey=";
+    let nineUrl = "https://www.sadcaptcha.com/api/v1/shein-nine?licenseKey=";
     const API_HEADERS = new Headers({ "Content-Type": "application/json" });
     // nine captcha appears in shadow root which 
     // main icon: document.querySelector("#nine-captcha-custom").shadowRoot.querySelector(".nine-header-content-img > img")
@@ -71,26 +72,17 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                     mutation.addedNodes.forEach(node => addedNode.push(node));
                     for (const node of addedNode)
                         for (const selector of selectors) {
-                            if (node instanceof HTMLIFrameElement) {
-                                let iframe = node;
-                                setTimeout(() => {
-                                    let iframeElement = iframe.contentWindow.document.body.querySelector(selector);
-                                    if (iframeElement) {
-                                        console.debug(`element matched ${selector} in iframe`);
-                                        observer.disconnect();
-                                        console.dir(iframeElement);
-                                        return resolve(iframeElement);
-                                    }
-                                }, 3000);
-                            }
-                            else if (node instanceof Element) {
-                                let element = node;
-                                if (element.querySelector(selector)) {
+                            if (node instanceof Element) {
+                                let element = document.querySelector(selector);
+                                if (element) {
                                     console.debug(`element matched ${selector}`);
                                     observer.disconnect();
                                     console.dir(element);
                                     return resolve(element);
                                 }
+                            }
+                            else {
+                                console.log("added node was not instanceof element");
                             }
                         }
                 }
@@ -157,9 +149,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     }
     function nineApiCall(request) {
         return __awaiter(this, void 0, void 0, function* () {
-            let resp = yield apiCall(iconUrl, request);
+            let resp = yield apiCall(nineUrl, request);
             let j = yield resp.json();
-            console.log("icon response: " + JSON.stringify(j));
+            console.log("nine captcha response: " + JSON.stringify(j));
             return j;
         });
     }
@@ -502,7 +494,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 for (let i = 0; i < icons.length; i++) {
                     const icon = icons[i];
                     const src = icon.src;
-                    images.push(yield fetchImageAsBase64(src));
+                    images.push(getBase64StringFromDataURL(yield fetchImageAsBase64(src)));
                 }
                 let request = {
                     images: images
@@ -510,7 +502,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 if (mainIcon !== null) {
                     console.log("this particular nine-captcha is image-to-image kind based on the main icon");
                     const src = mainIcon.src;
-                    const mainIconB64 = yield fetchImageAsBase64(src);
+                    const mainIconB64 = getBase64StringFromDataURL(yield fetchImageAsBase64(src));
                     request.baseImageB64 = mainIconB64;
                 }
                 else if (captchaHeader !== null) {
@@ -525,7 +517,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
                 console.log("got icon api solution:");
                 console.dir(solution);
                 // Click each returned point on the image with a natural delay between clicks.
-                for (const index of solution.solutionIndices) {
+                for (const index of solution.solutionIndices.slice(0, 3)) {
                     const answerIcon = icons[index];
                     clickProportional(answerIcon, 0.52, 0.34);
                     yield new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
