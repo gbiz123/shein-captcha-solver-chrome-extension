@@ -586,6 +586,8 @@ interface Request {
 			console.log("got icon api solution:")
 			console.dir(solution)
 
+			// TODO: Use trusted input and custom mouse movements
+
 			// Click each returned point on the image with a natural delay between clicks.
 			for (const index of solution.solutionIndices.slice(0, 3)) {
 				const answerIcon = icons[index]
