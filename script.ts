@@ -91,6 +91,9 @@ interface Request {
 		NINE
 	}
 
+	// Split each mouseMoved into a batch of interpolated points on the device pixel lattice
+	const INTERPOLATE_MOVES = false
+
 	function findFirstElementToAppear(selectors: Array<string>): Promise<Element> {
 		return new Promise(resolve => {
 			const observer: MutationObserver = new MutationObserver(mutations => {
@@ -242,192 +245,286 @@ interface Request {
 		})
 	}
 
-	function mouseUp(x: number, y: number): void {
-		CONTAINER.dispatchEvent(
-			new MouseEvent("mouseup", {
-				bubbles: true,
-				view: window,
-				clientX: x,
-				clientY: y
-			})
-		)
-		console.log("mouse up at " + x + ", " + y)
+	let trustedInputAvailable: boolean | null = null
+	let mouseIsDown: boolean = false
+
+	// Trusted input is produced by the extension's background service worker,
+	// which attaches chrome.debugger to this tab and forwards these messages to
+	// CDP Input.dispatchMouseEvent. Events dispatched that way have isTrusted = true.
+	async function sendInputMessage(message: object): Promise<boolean> {
+		try {
+			let resp = await chrome.runtime.sendMessage(message)
+			return resp !== undefined && resp !== null && resp.ok === true
+		} catch (err) {
+			console.log("error sending input message to background")
+			console.error(err)
+			return false
+		}
 	}
 
-	function mouseOver(x: number, y: number): void {
-		let underMouse = document.elementFromPoint(x, y)!
-		underMouse.dispatchEvent(
-			new MouseEvent("mouseover", {
-				cancelable: true,
-				bubbles: true,
-				view: window,
-				clientX: x,
-				clientY: y
-			})
-		)
-		console.log("mouse over at " + x + ", " + y)
+	function toDeviceLattice(v: number): number {
+		const dpr = window.devicePixelRatio || 1
+		return Math.round(v * dpr) / dpr
 	}
 
-	function mouseOut(x: number, y: number): void {
-		let underMouse = document.elementFromPoint(x, y)!
-		underMouse.dispatchEvent(
-			new MouseEvent("mouseout", {
-				cancelable: true,
-				bubbles: true,
-				view: window,
-				clientX: x,
-				clientY: y
-			})
-		)
-		console.log("mouse over at " + x + ", " + y)
+	let cursor: { x: number | null, y: number | null } = { x: null, y: null }
+
+	async function acquireTrustedInput(): Promise<boolean> {
+		trustedInputAvailable = await sendInputMessage({ sadCaptchaInput: "acquire" })
+		console.log("trusted input available: " + trustedInputAvailable)
+		return trustedInputAvailable
 	}
 
-	function mouseDown(x: number, y: number): void {
-		let underMouse = document.elementFromPoint(x, y)!
-		underMouse.dispatchEvent(
-			new MouseEvent("mousedown", {
-				cancelable: true,
-				bubbles: true,
-				view: window,
-				clientX: x,
-				clientY: y
-			})
-		)
-		console.log("mouse down at " + x + ", " + y)
+	async function releaseTrustedInput(): Promise<void> {
+		if (trustedInputAvailable === true)
+			await sendInputMessage({ sadCaptchaInput: "release" })
+		trustedInputAvailable = null
+		mouseIsDown = false
 	}
 
-	function mouseEnterPage(): void {
-		let width = window.innerWidth
-		let centerX = window.innerWidth / 2
-		let centerY = window.innerHeight / 2
-		CONTAINER.dispatchEvent(
-			new MouseEvent("mouseenter", {
-				bubbles: true,
-				view: window,
-				clientX: width,
-				clientY: centerY
-			})
-		)
-		CONTAINER.dispatchEvent(
-			new MouseEvent("mouseover", {
-				cancelable: true,
-				bubbles: true,
-				view: window,
-				clientX: width,
-				clientY: centerY
-			})
-		)
-		for (let i = 1; i < centerX; i++) {
-			try {
-				mouseMove(width - i, centerY)
-				mouseOver(width - i, centerY)
-			} catch (err) {
-				console.log("error moving mouse into page: ")
-				console.dir(err)
+	async function dispatchTrustedMouse(params: any): Promise<boolean> {
+		const prevX = cursor.x
+		const prevY = cursor.y
+		if (typeof params.x === "number" && typeof params.y === "number") {
+			cursor.x = params.x
+			cursor.y = params.y
+		}
+		if (trustedInputAvailable === false)
+			return false
+		if (trustedInputAvailable === null)
+			await acquireTrustedInput()
+		if (trustedInputAvailable !== true)
+			return false
+
+		let msg: object
+		let paceMs = 0
+		if (INTERPOLATE_MOVES && params.type === "mouseMoved"
+			&& prevX !== null && prevY !== null
+			&& typeof params.x === "number") {
+			const dist = Math.sqrt(Math.pow(params.x - prevX, 2)
+				+ Math.pow(params.y - prevY, 2))
+			const pts = Math.max(2, Math.min(12, Math.round(dist / 4)))
+			let batch: Array<object> = []
+			for (let i = 1; i <= pts; i++) {
+				const f = i / pts
+				batch.push(Object.assign({}, params, {
+					x: toDeviceLattice(prevX + (params.x - prevX) * f),
+					y: toDeviceLattice(prevY + (params.y - prevY) * f)
+				}))
+			}
+			paceMs = pts * 2 + 4
+			msg = { sadCaptchaInput: "mouseBatch", batch: batch }
+		} else {
+			msg = { sadCaptchaInput: "mouse", params: params }
+		}
+
+		const t0 = performance.now()
+		let ok = await sendInputMessage(msg)
+		if (!ok) {
+			// debugger may have been detached, try to re-attach once
+			trustedInputAvailable = null
+			await acquireTrustedInput()
+			if (trustedInputAvailable === true)
+				ok = await sendInputMessage(msg)
+		}
+		const spent = performance.now() - t0
+		if (paceMs > spent)
+			await new Promise(r => setTimeout(r, paceMs - spent))
+		if (!ok) {
+			console.log("trusted input failed, falling back to synthetic events")
+			trustedInputAvailable = false
+		}
+		return ok
+	}
+
+	// CDP coordinates are relative to the top-level viewport,
+	// so account for any iframes the element is nested in.
+	function frameOffset(element: Element): Point {
+		let offset: Point = { x: 0, y: 0 }
+		try {
+			let win: Window | null = element.ownerDocument.defaultView
+			while (win !== null && win !== window) {
+				let frame = win.frameElement
+				if (frame === null)
+					break
+				let rect = frame.getBoundingClientRect()
+				offset.x += rect.x + frame.clientLeft
+				offset.y += rect.y + frame.clientTop
+				win = win.parent
+			}
+		} catch (err) {
+		}
+		return offset
+	}
+
+	function viewportRect(element: Element): DOMRect {
+		let rect = element.getBoundingClientRect()
+		let offset = frameOffset(element)
+		if (offset.x === 0 && offset.y === 0)
+			return rect
+		return new DOMRect(rect.x + offset.x, rect.y + offset.y, rect.width, rect.height)
+	}
+
+	// Like document.elementFromPoint, but descends into iframes and open shadow roots
+	// (the nine captcha lives inside a shadow root)
+	function elementFromViewportPoint(x: number, y: number): Element | null {
+		let element = document.elementFromPoint(x, y)
+		let localX = x
+		let localY = y
+		while (element !== null) {
+			if (element instanceof HTMLIFrameElement) {
+				try {
+					let rect = element.getBoundingClientRect()
+					localX -= rect.x + element.clientLeft
+					localY -= rect.y + element.clientTop
+					let inner = element.contentWindow!.document.elementFromPoint(localX, localY)
+					if (inner === null)
+						break
+					element = inner
+				} catch (err) {
+					break
+				}
+			} else if (element.shadowRoot !== null) {
+				let inner = element.shadowRoot.elementFromPoint(localX, localY)
+				if (inner === null || inner === element)
+					break
+				element = inner
+			} else {
+				break
 			}
 		}
+		return element
 	}
 
-	function randomMouseMovement() {
-		//let randomX = aroundX + Math.round((Math.random() * 20) - 10)
-		//let randomY = aroundY + Math.round((Math.random() * 20) - 10)
-		let randomX = Math.round(window.innerWidth * Math.random())
-		let randomY = Math.round(window.innerHeight * Math.random())
-		mouseMove(randomX, randomX)
-		mouseOver(randomX, randomY)
-		mouseOut(randomX, randomY)
-	}
-
-	function mouseClick(element: Element, x: number, y: number): void {
-		const eventOptions = {
-			pointerType: "mouse",
-			cancelable: true,
-			bubbles: true,
-			view: window,
-			clientX: x,
-			clientY: y,
-			button: 0,
-			buttons: 1,
-		};
-
-		element.dispatchEvent(new PointerEvent("pointerover", eventOptions));
-		element.dispatchEvent(new PointerEvent("pointerenter", eventOptions));
-		element.dispatchEvent(new MouseEvent("mouseover", eventOptions));
-		element.dispatchEvent(new MouseEvent("mouseenter", eventOptions));
-		element.dispatchEvent(new MouseEvent("mousemove", eventOptions));
-		element.dispatchEvent(new PointerEvent("pointermove", eventOptions));
-		element.dispatchEvent(new PointerEvent("pointerdown", eventOptions));
-		element.dispatchEvent(new MouseEvent("mousedown", eventOptions));
-		element.dispatchEvent(new PointerEvent("pointerup", eventOptions));
-		element.dispatchEvent(new MouseEvent("mouseup", eventOptions));
-		element.dispatchEvent(new MouseEvent("click", eventOptions));
-	}
-
-	function clickProportional(element: Element, proportionX: number, proportionY: number): void {
-		let boundingBox = element.getBoundingClientRect()
-		let xOrigin = boundingBox.x
-		let yOrigin = boundingBox.y
-		let xOffset = (proportionX * boundingBox.width)
-		let yOffset = (proportionY * boundingBox.height)
-		let x = xOrigin + xOffset
-		let y = yOrigin + yOffset
-		console.log(`clicked at ${x}, ${y}`)
-		mouseClick(element, x, y)
-	}
-
-	function clickElement(selector: string) {
-		let ele = document.querySelector(selector)!
-		console.log("sending mouse event click")
-		let rect = ele.getBoundingClientRect()
-		let x = rect.x
-		let y = rect.y
-
-		const eventOptions = {
-			pointerType: "mouse",
-			cancelable: true,
-			bubbles: true,
-			view: window,
-			clientX: x,
-			clientY: y,
-			button: 0,
-			buttons: 1,
-		};
-
-		ele.dispatchEvent(new PointerEvent("pointerover", eventOptions));
-		ele.dispatchEvent(new PointerEvent("pointerenter", eventOptions));
-		ele.dispatchEvent(new MouseEvent("mouseover", eventOptions));
-		ele.dispatchEvent(new MouseEvent("mouseenter", eventOptions));
-		ele.dispatchEvent(new MouseEvent("mousemove", eventOptions));
-		ele.dispatchEvent(new PointerEvent("pointermove", eventOptions));
-		ele.dispatchEvent(new PointerEvent("pointerdown", eventOptions));
-		ele.dispatchEvent(new MouseEvent("mousedown", eventOptions));
-		ele.dispatchEvent(new PointerEvent("pointerup", eventOptions));
-		ele.dispatchEvent(new MouseEvent("mouseup", eventOptions));
-		ele.dispatchEvent(new MouseEvent("click", eventOptions));
-	}
-
-	function mouseMove(x: number, y: number, ele?: Element): void {
-		let c: Element
-		if (ele === undefined) {
-			c = CONTAINER
-		} else {
-			c = ele
-		}
-		c.dispatchEvent(
-			new PointerEvent("mousemove", {
+	// Fallback used only when trusted input is unavailable
+	function syntheticMouseEvent(type: string, x: number, y: number): void {
+		let target = elementFromViewportPoint(x, y)
+		if (target === null)
+			target = CONTAINER
+		target.dispatchEvent(
+			new PointerEvent(type, {
 				pointerType: "mouse",
 				cancelable: true,
 				bubbles: true,
+				composed: true,
 				view: window,
 				clientX: x,
-				clientY: y
+				clientY: y,
+				button: 0,
+				buttons: mouseIsDown ? 1 : 0
 			})
 		)
-		console.log("moved mouse to " + x + ", " + y)
+	}
+
+	async function mouseDown(x: number, y: number): Promise<void> {
+		mouseIsDown = true
+		let trusted = await dispatchTrustedMouse({
+			type: "mousePressed",
+			x: x,
+			y: y,
+			button: "left",
+			buttons: 1,
+			clickCount: 1,
+			pointerType: "mouse"
+		})
+		if (!trusted) {
+			syntheticMouseEvent("pointerdown", x, y)
+			syntheticMouseEvent("mousedown", x, y)
+		}
+		console.log("mouse down at " + x + ", " + y)
+	}
+
+	async function mouseUp(x: number, y: number): Promise<void> {
+		let trusted = await dispatchTrustedMouse({
+			type: "mouseReleased",
+			x: x,
+			y: y,
+			button: "left",
+			buttons: 1,
+			clickCount: 1,
+			pointerType: "mouse"
+		})
+		if (!trusted) {
+			syntheticMouseEvent("pointerup", x, y)
+			syntheticMouseEvent("mouseup", x, y)
+		}
+		mouseIsDown = false
+		console.log("mouse up at " + x + ", " + y)
+	}
+
+	async function mouseMove(x: number, y: number): Promise<void> {
+		let trusted = await dispatchTrustedMouse({
+			type: "mouseMoved",
+			x: x,
+			y: y,
+			button: mouseIsDown ? "left" : "none",
+			buttons: mouseIsDown ? 1 : 0,
+			pointerType: "mouse"
+		})
+		if (!trusted) {
+			syntheticMouseEvent("pointermove", x, y)
+			syntheticMouseEvent("mousemove", x, y)
+		}
+	}
+
+	async function mouseEnterPage(): Promise<void> {
+		let centerX = window.innerWidth / 2
+		let centerY = window.innerHeight / 2
+
+		let entryPath = generateNaturalApproach(
+			{ x: 0, y: centerY * 0.9 },
+			{ x: centerX, y: centerY },
+			(Math.random() * 10) + 50
+		)
+		for (const pt of entryPath) {
+			await mouseMove(pt.x, pt.y)
+			await new Promise(r => setTimeout(r, 5 + Math.random() * 10));
+		}
+	}
+
+	// Move along a curved path from the current cursor position to (x, y)
+	async function moveCursorTo(x: number, y: number): Promise<void> {
+		if (cursor.x === null || cursor.y === null) {
+			await mouseApproach(x, y)
+			return
+		}
+		const dist = Math.sqrt(Math.pow(x - cursor.x, 2) + Math.pow(y - cursor.y, 2))
+		const steps = Math.max(6, Math.min(30, Math.round(dist / 15)))
+		const path = generateNaturalApproach({ x: cursor.x, y: cursor.y }, { x: x, y: y }, steps)
+		for (const pt of path) {
+			await mouseMove(pt.x, pt.y)
+			await new Promise(r => setTimeout(r, 8 + Math.random() * 14));
+		}
+	}
+
+	async function clickAt(x: number, y: number): Promise<void> {
+		await moveCursorTo(x, y)
+		await new Promise(r => setTimeout(r, 30 + Math.random() * 50));
+		await mouseDown(x, y)
+		await new Promise(r => setTimeout(r, 40 + Math.random() * 60));
+		await mouseUp(x, y)
+
+		if (trustedInputAvailable !== true)
+			syntheticMouseEvent("click", x, y)
+		console.log(`clicked at ${x}, ${y}`)
+	}
+
+	async function clickProportional(element: Element, proportionX: number, proportionY: number): Promise<void> {
+		let boundingBox = viewportRect(element)
+		let x = boundingBox.x + (proportionX * boundingBox.width)
+		let y = boundingBox.y + (proportionY * boundingBox.height)
+		await clickAt(x, y)
+	}
+
+	async function clickElement(selector: string): Promise<void> {
+		let ele = document.querySelector(selector)!
+		console.log("clicking element " + selector)
+		let center = getElementCenter(ele)
+		await clickAt(center.x, center.y)
 	}
 
 	function getElementCenter(element: Element): Point {
-		let rect = element.getBoundingClientRect()
+		let rect = viewportRect(element)
 		let center = {
 			x: rect.x + (rect.width / 2),
 			y: rect.y + (rect.height / 2),
@@ -438,7 +535,7 @@ interface Request {
 	}
 
 	function getElementWidth(element: Element): number {
-		let rect = element.getBoundingClientRect()
+		let rect = viewportRect(element)
 		console.log("element width: " + rect.width)
 		return rect.width
 	}
@@ -473,14 +570,7 @@ interface Request {
 	}
 
 	async function moveMouseTo(x: number, y: number): Promise<void> {
-		CONTAINER.dispatchEvent(
-			new MouseEvent("mousemove", {
-				bubbles: true,
-				view: window,
-				clientX: x,
-				clientY: y
-			})
-		)
+		await mouseMove(x, y)
 		console.log("moved mouse to " + x + ", " + y)
 	}
 
@@ -496,13 +586,13 @@ interface Request {
 
 		// Move cursor to approach the handle naturally
 		for (const point of approachPoints) {
-			moveMouseTo(point.x, point.y);
+			await moveMouseTo(point.x, point.y);
 			await new Promise(r => setTimeout(r, 15 + Math.random() * 25));
 		}
 
 		// Hover on handle with slight jitter
 		await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
-		moveMouseTo(
+		await moveMouseTo(
 			x + (Math.random() * 1.5 - 0.75),
 			y + (Math.random() * 1.5 - 0.75)
 		);
@@ -527,17 +617,17 @@ interface Request {
 
 			// Click each returned point on the image with a natural delay between clicks.
 			for (const point of solution.proportionalPoints) {
-				clickProportional(iconImageDiv, point.proportionX, point.proportionY)
+				await clickProportional(iconImageDiv, point.proportionX, point.proportionY)
 				await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
 			}
 
 			// Submit the solution.
-			clickElement(ICON_SUBMIT_BUTTON)
+			await clickElement(ICON_SUBMIT_BUTTON)
 			await new Promise(r => setTimeout(r, 3000));
 		} catch (err)  {
 			console.log(err)
 			console.log("refreshing captcha")
-			clickElement(ICON_REFRESH_BUTTON)
+			await clickElement(ICON_REFRESH_BUTTON)
 			await new Promise(r => setTimeout(r, 2000));
 		}
 	}
@@ -586,24 +676,22 @@ interface Request {
 			console.log("got icon api solution:")
 			console.dir(solution)
 
-			// TODO: Use trusted input and custom mouse movements
-
 			// Click each returned point on the image with a natural delay between clicks.
 			for (const index of solution.solutionIndices.slice(0, 3)) {
 				const answerIcon = icons[index]
-				clickProportional(answerIcon, 0.52, 0.34)
+				await clickProportional(answerIcon, 0.52, 0.34)
 				await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
 				console.log("clicked icon")
 				// check if solution success
 			}
 
 			// Submit the solution.
-			clickElement(ICON_SUBMIT_BUTTON)
+			await clickElement(ICON_SUBMIT_BUTTON)
 			await new Promise(r => setTimeout(r, 3000));
 		} catch (err)  {
 			console.log(err)
 			console.log("refreshing captcha")
-			clickElement(ICON_REFRESH_BUTTON)
+			await clickElement(ICON_REFRESH_BUTTON)
 			await new Promise(r => setTimeout(r, 2000));
 		}
 	}
@@ -654,6 +742,8 @@ interface Request {
 				console.log("proceeding to attempt solution anyways")
 			}
 
+			await acquireTrustedInput()
+
 			try {
 				switch (captchaType) {
 					case CaptchaType.ICON:
@@ -668,6 +758,7 @@ interface Request {
 				console.error(err)
 				console.log("restarting captcha loop")
 			} finally {
+				await releaseTrustedInput()
 				isCurrentSolve = false
 				await new Promise(r => setTimeout(r, 5000));
 				await solveCaptchaLoop()
