@@ -50,6 +50,9 @@ interface Request {
 	const NINE_CAPTCHA_ICONS = ".nine-content-pic > img"
 	const NINE_CAPTCHA_UNIQUE_IDENTIFIERS = [NINE_CAPTCHA_CONTAINER]
 
+	const ONE_PASS_CONTAINER = "#one-pass-custom"
+	const ONE_PASS_CHECKBOX = ".risk-one-pass-content-checkbox"
+
 	const ICON_IMAGE_DIV = ".pic_wrapper"
 	const ICON_SUBMIT_BUTTON = ".captcha_click_confirm"
 	const ICON_REFRESH_BUTTON = ".captcha_click_refresh"
@@ -696,6 +699,30 @@ interface Request {
 		}
 	}
 
+	async function clickOnePass() {
+		const container = await waitForElement(ONE_PASS_CONTAINER)
+
+		if (container.shadowRoot === null) {
+			throw new Error(`one pass container (${ONE_PASS_CONTAINER}) does not have a shadow root`)
+		}
+
+		const checkbox = container.shadowRoot.querySelector(ONE_PASS_CHECKBOX)
+		if (checkbox === null) {
+			throw new Error(`checkbox with selector ${ONE_PASS_CHECKBOX} was not found`)
+		}
+		await clickProportional(checkbox, 0.52, 0.47)
+		console.log("clicked checkbox")
+	}
+
+	function onePassIsPresent(): boolean {
+		if (document.querySelector(ONE_PASS_CONTAINER)) {
+			console.log("one pass present based on selector: " + ONE_PASS_CONTAINER)
+			return true;
+		}
+		console.log("one pass not present")
+		return false
+	}
+
 	function captchaIsPresent(): boolean {
 		for (let i = 0; i < CAPTCHA_PRESENCE_INDICATORS.length; i++) {
 			if (document.querySelector(CAPTCHA_PRESENCE_INDICATORS[i])) {
@@ -712,9 +739,30 @@ interface Request {
 	async function solveCaptchaLoop() {
 		if (!isCurrentSolve) {
 
+			if (
+				onePassIsPresent() || captchaIsPresent()
+			) {
+				console.log("one pass or captcha is present, no need to wait")
+			} else {
+				console.log("waiting for one pass or captcha container")
+				await findFirstElementToAppear([...CAPTCHA_PRESENCE_INDICATORS, ONE_PASS_CONTAINER])
+			}
+
+			if (onePassIsPresent()) {
+				console.log("one pass is present ")
+				await clickOnePass()
+				await new Promise(r => setTimeout(r, 1000));
+			} else {
+				console.log("one pass is not present")
+			}
+
 			if (captchaIsPresent()){
 				console.log("captcha detected by css selector")
 			} else {
+				if (onePassIsPresent()) {
+					console.log("one pass is still present after clicking, returning to beginning of solve loop")
+					await solveCaptchaLoop()
+				}
 				console.log("waiting for captcha")
 				await findFirstElementToAppear(CAPTCHA_PRESENCE_INDICATORS)
 				console.log("captcha detected by mutation observer")

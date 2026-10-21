@@ -47,6 +47,8 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     const NINE_CAPTCHA_HEADER_TEXT = ".nine-header-content-title";
     const NINE_CAPTCHA_ICONS = ".nine-content-pic > img";
     const NINE_CAPTCHA_UNIQUE_IDENTIFIERS = [NINE_CAPTCHA_CONTAINER];
+    const ONE_PASS_CONTAINER = "#one-pass-custom";
+    const ONE_PASS_CHECKBOX = ".risk-one-pass-content-checkbox";
     const ICON_IMAGE_DIV = ".pic_wrapper";
     const ICON_SUBMIT_BUTTON = ".captcha_click_confirm";
     const ICON_REFRESH_BUTTON = ".captcha_click_refresh";
@@ -653,6 +655,28 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
             }
         });
     }
+    function clickOnePass() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const container = yield waitForElement(ONE_PASS_CONTAINER);
+            if (container.shadowRoot === null) {
+                throw new Error(`one pass container (${ONE_PASS_CONTAINER}) does not have a shadow root`);
+            }
+            const checkbox = container.shadowRoot.querySelector(ONE_PASS_CHECKBOX);
+            if (checkbox === null) {
+                throw new Error(`checkbox with selector ${ONE_PASS_CHECKBOX} was not found`);
+            }
+            yield clickProportional(checkbox, 0.52, 0.47);
+            console.log("clicked checkbox");
+        });
+    }
+    function onePassIsPresent() {
+        if (document.querySelector(ONE_PASS_CONTAINER)) {
+            console.log("one pass present based on selector: " + ONE_PASS_CONTAINER);
+            return true;
+        }
+        console.log("one pass not present");
+        return false;
+    }
     function captchaIsPresent() {
         for (let i = 0; i < CAPTCHA_PRESENCE_INDICATORS.length; i++) {
             if (document.querySelector(CAPTCHA_PRESENCE_INDICATORS[i])) {
@@ -667,10 +691,29 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     function solveCaptchaLoop() {
         return __awaiter(this, void 0, void 0, function* () {
             if (!isCurrentSolve) {
+                if (onePassIsPresent() || captchaIsPresent()) {
+                    console.log("one pass or captcha is present, no need to wait");
+                }
+                else {
+                    console.log("waiting for one pass or captcha container");
+                    yield findFirstElementToAppear([...CAPTCHA_PRESENCE_INDICATORS, ONE_PASS_CONTAINER]);
+                }
+                if (onePassIsPresent()) {
+                    console.log("one pass is present ");
+                    yield clickOnePass();
+                    yield new Promise(r => setTimeout(r, 1000));
+                }
+                else {
+                    console.log("one pass is not present");
+                }
                 if (captchaIsPresent()) {
                     console.log("captcha detected by css selector");
                 }
                 else {
+                    if (onePassIsPresent()) {
+                        console.log("one pass is still present after clicking, returning to beginning of solve loop");
+                        yield solveCaptchaLoop();
+                    }
                     console.log("waiting for captcha");
                     yield findFirstElementToAppear(CAPTCHA_PRESENCE_INDICATORS);
                     console.log("captcha detected by mutation observer");
